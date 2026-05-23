@@ -46,35 +46,53 @@ stops changing.
 Real end-to-end run on 2026-05-22 (build #72659):
 
 ```text
-$ python3 trigger_topology.py trigger
-Triggered Dispo-0522, resolving build number...
-Build #72659 started: https://jenkins.dc1.apstra.com/job/ptest/job/Give_me_a_topology/72659/
-
-$ python3 trigger_topology.py wait
-Waiting on Dispo-0522 (build #72659): https://jenkins.dc1.apstra.com/job/ptest/job/Give_me_a_topology/72659/
+python3 trigger_topology.py trigger \
+  && python3 trigger_topology.py wait \
+  && python3 trigger_topology.py verify \
+  && python3 trigger_topology.py monitor
+Triggered Dispo-0523, resolving build number...
+Build #72697 started: https://jenkins.dc1.apstra.com/job/ptest/job/Give_me_a_topology/72697/
+Waiting on Dispo-0523 (build #72697): https://jenkins.dc1.apstra.com/job/ptest/job/Give_me_a_topology/72697/
   building... (0m 1s elapsed)
-  building... (0m 31s elapsed)
-  ...
-  building... (3m 34s elapsed)
-Finished: SUCCESS (took 3m 44s)
-Topology: zz-Dispo-0522-evpn_mlag.vex.2485377892354-2603053242
-
-$ python3 trigger_topology.py verify
-Verifying topology zz-Dispo-0522-evpn_mlag.vex.2485377892354-2603053242
-Verified: zz-Dispo-0522-evpn_mlag.vex.2485377892354-2603053242 present in Slicer (deploy_status=not_deployed)
-
-# `verify -v` (or `--verbose`) additionally prints the full Slicer payload
-# (~130 KB JSON of deploy_model.devices + reservation fields).
-
-$ python3 trigger_topology.py monitor
-Monitoring deploy_status of zz-Dispo-0522-evpn_mlag.vex.2485377892354-2603053242
+  building... (0m 32s elapsed)
+  building... (1m 2s elapsed)
+  building... (1m 33s elapsed)
+  building... (2m 3s elapsed)
+  building... (2m 34s elapsed)
+  building... (3m 4s elapsed)
+  building... (3m 35s elapsed)
+  building... (4m 5s elapsed)
+  building... (4m 35s elapsed)
+  building... (5m 6s elapsed)
+  building... (5m 36s elapsed)
+Finished: SUCCESS (took 5m 56s)
+Topology: zz-Dispo-0523-evpn_mlag.vex.2485377892354-961841954
+Verifying topology zz-Dispo-0523-evpn_mlag.vex.2485377892354-961841954
+Verified: zz-Dispo-0523-evpn_mlag.vex.2485377892354-961841954 present in Slicer (deploy_status=not_deployed)
+Monitoring deploy_status of zz-Dispo-0523-evpn_mlag.vex.2485377892354-961841954
   [0m 0s] deploy_status -> 'not_deployed'
-  not_deployed... (2m 0s elapsed)
-  [4m 0s] deploy_status -> 'deploy_in_progress'
-  deploy_in_progress... (6m 0s elapsed)
-  deploy_in_progress... (8m 0s elapsed)
-  [10m 0s] deploy_status -> 'deployed'
-Deployed in 10m 0s
+  not_deployed... (2m 1s elapsed)
+  not_deployed... (4m 2s elapsed)
+  not_deployed... (6m 3s elapsed)
+  not_deployed... (8m 3s elapsed)
+  not_deployed... (10m 5s elapsed)
+  not_deployed... (12m 6s elapsed)
+  not_deployed... (14m 6s elapsed)
+  not_deployed... (16m 7s elapsed)
+  not_deployed... (18m 8s elapsed)
+  not_deployed... (20m 9s elapsed)
+  not_deployed... (22m 10s elapsed)
+  not_deployed... (24m 10s elapsed)
+  not_deployed... (26m 11s elapsed)
+  not_deployed... (28m 12s elapsed)
+  not_deployed... (30m 13s elapsed)
+  not_deployed... (32m 14s elapsed)
+  not_deployed... (34m 14s elapsed)
+  not_deployed... (36m 15s elapsed)
+  not_deployed... (38m 17s elapsed)
+  not_deployed... (40m 17s elapsed)
+  not_deployed... (42m 18s elapsed)
+  not_deployed... (44m 19s elapsed)
 ```
 
 How to read it:
