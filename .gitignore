@@ -1,0 +1,6 @@
+.env
+scheduler/logs/
+state/
+__pycache__/
+*.pyc
+.venv/
