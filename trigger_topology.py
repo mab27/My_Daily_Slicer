@@ -43,7 +43,7 @@ BUILD_POLL_TIMEOUT_S = 30 * 60
 SLICER_POLL_INTERVAL_S = 20
 SLICER_POLL_TIMEOUT_S = 10 * 60
 MONITOR_POLL_INTERVAL_S = 120
-MONITOR_POLL_TIMEOUT_S = 45 * 60
+MONITOR_POLL_TIMEOUT_S = 90 * 60
 
 SLICER_NAME_RE = re.compile(r"Creating systest:\s+(zz-Dispo-\S+)")
 
@@ -131,6 +131,8 @@ def cmd_trigger(args: argparse.Namespace) -> int:
     session = make_session(args.user, args.token)
     name = args.name or run_name()
     params = {**DEFAULT_PARAMS, "RUN_NAME": name}
+    if args.version:
+        params["RUN_FROM_BRANCH"] = args.version
 
     resp = session.post(
         f"{JENKINS_BASE}{JOB_PATH}/buildWithParameters",
@@ -142,12 +144,13 @@ def cmd_trigger(args: argparse.Namespace) -> int:
     resp.raise_for_status()
     queue_url = resp.headers["Location"]
 
-    print(f"Triggered {name}, resolving build number...")
+    print(f"Triggered {name} (RUN_FROM_BRANCH={params['RUN_FROM_BRANCH']}), resolving build number...")
     build_number, build_url = resolve_queue_item(session, queue_url)
 
     STATE_DIR.mkdir(exist_ok=True)
     STATE_FILE.write_text(json.dumps({
         "name": name,
+        "version": params["RUN_FROM_BRANCH"],
         "build_number": build_number,
         "build_url": build_url,
         "triggered_at": dt.datetime.now(CET).isoformat(timespec="seconds"),
@@ -304,6 +307,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     trig = sub.add_parser("trigger", help="Fire the build and record state")
     trig.add_argument("--name", help="Override RUN_NAME (default: Dispo-<MMDD> in CET)")
+    trig.add_argument(
+        "--version",
+        help="AOS version to build from, sent as RUN_FROM_BRANCH (default: AOS_latest_OB). "
+             "Example: --version AOS_6.1.0_OB",
+    )
     trig.set_defaults(func=cmd_trigger)
 
     wait = sub.add_parser("wait", help="Poll until the recorded build finishes")

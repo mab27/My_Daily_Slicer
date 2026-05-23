@@ -28,6 +28,16 @@ python3 trigger_topology.py trigger \
   && python3 trigger_topology.py monitor
 ```
 
+`trigger` defaults to the latest open branch (`RUN_FROM_BRANCH=AOS_latest_OB`).
+Pass `--version` to pin a specific AOS release branch:
+
+```sh
+python3 trigger_topology.py trigger --version AOS_6.1.0_OB
+```
+
+The value is sent as the Jenkins `RUN_FROM_BRANCH` parameter; `TARGET_BUILD`
+stays on `AOS_latest_OB`.
+
 `trigger` is fast — it submits the build and resolves the queue item to a real
 build number, then writes `state/current.json`. `wait` reads that file and
 polls the build's `/api/json` until `building == false`. The two are

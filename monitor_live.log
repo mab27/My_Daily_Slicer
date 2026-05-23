@@ -1,0 +1,4 @@
+Monitoring deploy_status of zz-Dispo-0523-evpn_mlag.vex.2485377892354-961841954
+  [0m 0s] deploy_status -> 'deploy_in_progress'
+  [2m 1s] deploy_status -> 'deployed'
+Deployed in 2m 1s
