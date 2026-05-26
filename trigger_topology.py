@@ -766,10 +766,7 @@ def cmd_latest(args: argparse.Namespace) -> int:
             latest_slicer = st.get("slicer_name")
             latest_time = triggered
     if latest_name:
-        if latest_slicer:
-            print(f"{latest_name}: {latest_slicer}")
-        else:
-            print(latest_name)
+        print(latest_name)
         return 0
     print("ERROR: no valid state files found", file=sys.stderr)
     return 2
