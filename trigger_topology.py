@@ -622,9 +622,9 @@ def is_reservation_released(slicer_name: str) -> bool:
     return False
 
 
-def request_unreserve(slicer_name: str) -> int:
-    url = f"{SLICER_BASE}/v1_1/systest/{slicer_name}/unreserve"
-    resp = requests.post(url, headers=slicer_headers(), timeout=30, verify=False)
+def request_release_resources(slicer_name: str) -> int:
+    url = f"{SLICER_BASE}/v1_1/systest/{slicer_name}/release-resources"
+    resp = requests.post(url, headers=slicer_headers(), json={"is_async": False}, timeout=30, verify=False)
     return resp.status_code
 
 
@@ -654,8 +654,8 @@ def delete_one(name: str, skip_if_already_deleted: bool) -> bool | int:
         print(f"WARN: {name}: already deleted at {state['deleted_at']}, deleting again", flush=True)
 
     if not is_reservation_released(slicer_name):
-        print(f"  {name}: reservation still active, requesting release...", flush=True)
-        rc = request_unreserve(slicer_name)
+        print(f"  {name}: reservation still active, releasing resources...", flush=True)
+        rc = request_release_resources(slicer_name)
         if rc not in (200, 202, 204):
             msg = f"unreserve returned HTTP {rc}"
             if skip_if_already_deleted:
