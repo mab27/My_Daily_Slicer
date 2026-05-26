@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Provision and track a daily disposable Jenkins topology.
+"""Provision, track, and tear down disposable Jenkins/Slicer topologies.
+
+State lives one-file-per-topology under `state/<run_name>.json`; every
+subcommand requires `--name` (no implicit selection). `--all` is supported on
+undeploy/monitor-undeploy for the daily teardown sweep.
 
 Subcommands:
-  trigger  Fire the Jenkins build, resolve the queue item to a build number,
-           save state to state/current.json. Fast.
-  wait     Read state, poll until the build finishes. Long-running (~20 min).
-  verify   Confirm the topology is registered with Slicer (any deploy_status).
-  monitor  Poll Slicer deploy_status until it reaches 'deployed'. Slicer
-           auto-progresses the topology through not_deployed ->
-           deploy_in_progress -> deployed without any external trigger.
+  trigger           Fire the Jenkins build and create state/<name>.json. Fast.
+  wait              Poll until the recorded build finishes. Long-running.
+  verify            Confirm the topology is registered with Slicer.
+  monitor           Watch deploy_status walk to 'deployed'.
+  undeploy          POST Slicer's undeploy endpoint (one --name, or --all).
+  monitor-undeploy  Watch deploy_status walk back to 'not_deployed'.
+  list              Show every tracked topology and its current stage.
+  latest            Print the most-recently triggered topology's run_name.
 """
 from __future__ import annotations
 
@@ -34,7 +39,6 @@ SLICER_OWNER = "mabdelouahab@juniper.net"
 CET = ZoneInfo("Europe/Paris")
 
 STATE_DIR = Path(__file__).resolve().parent / "state"
-STATE_FILE = STATE_DIR / "current.json"
 
 QUEUE_POLL_INTERVAL_S = 2
 QUEUE_POLL_TIMEOUT_S = 120
@@ -88,10 +92,43 @@ DEFAULT_PARAMS = {
     "ENABLE_ERROR_ACTIVITY_HISTOGRAM": "false",
 }
 
+# Lifecycle timestamps recorded in state files, in chronological order.
+LIFECYCLE_KEYS = [
+    "triggered_at",
+    "build_finished_at",
+    "verified_at",
+    "deploy_started_at",
+    "deployed_at",
+    "undeploy_requested_at",
+    "undeploy_started_at",
+    "undeployed_at",
+]
 
-def run_name(now: dt.datetime | None = None) -> str:
-    now = now or dt.datetime.now(CET)
-    return f"Dispo-{now.strftime('%m%d')}"
+
+def now_iso() -> str:
+    return dt.datetime.now(CET).isoformat(timespec="seconds")
+
+
+def state_path(name: str) -> Path:
+    return STATE_DIR / f"{name}.json"
+
+
+def load_state(name: str) -> dict:
+    path = state_path(name)
+    if not path.exists():
+        raise FileNotFoundError(f"no state file at {path} — run `trigger --name {name}` first")
+    return json.loads(path.read_text())
+
+
+def save_state(name: str, state: dict) -> None:
+    STATE_DIR.mkdir(exist_ok=True)
+    state_path(name).write_text(json.dumps(state, indent=2) + "\n")
+
+
+def all_state_files() -> list[Path]:
+    if not STATE_DIR.exists():
+        return []
+    return sorted(p for p in STATE_DIR.glob("*.json"))
 
 
 def make_session(user: str | None, token: str | None) -> requests.Session:
@@ -127,12 +164,48 @@ def resolve_queue_item(session: requests.Session, queue_url: str) -> tuple[int, 
     raise TimeoutError(f"Queue item {queue_url} did not start within {QUEUE_POLL_TIMEOUT_S}s")
 
 
+def slicer_headers() -> dict[str, str]:
+    return {"owner": SLICER_OWNER, "Content-Type": "application/json"}
+
+
+def slicer_get(slicer_name: str) -> requests.Response:
+    url = f"{SLICER_BASE}/v1_1/systest/{slicer_name}"
+    params = [("field", f) for f in SLICER_FIELDS]
+    return requests.get(url, headers=slicer_headers(), params=params, timeout=30, verify=False)
+
+
+def extract_slicer_name(session: requests.Session, build_url: str) -> str | None:
+    resp = session.get(f"{build_url}consoleText", timeout=60)
+    resp.raise_for_status()
+    m = SLICER_NAME_RE.search(resp.text)
+    return m.group(1) if m else None
+
+
+def default_run_name(now: dt.datetime | None = None) -> str:
+    now = now or dt.datetime.now(CET)
+    return f"Dispo-{now.strftime('%m%d')}"
+
+
 def cmd_trigger(args: argparse.Namespace) -> int:
+    name = args.name or default_run_name()
+    path = state_path(name)
+    if path.exists():
+        if args.name:
+            print(f"ERROR: {path} already exists. Pick a different --name or remove it first.", file=sys.stderr)
+        else:
+            print(
+                f"ERROR: {path} already exists (today's default name is taken). "
+                f"Pass --name <run_name> to provision another topology today.",
+                file=sys.stderr,
+            )
+        return 2
+
     session = make_session(args.user, args.token)
-    name = args.name or run_name()
     params = {**DEFAULT_PARAMS, "RUN_NAME": name}
     if args.version:
         params["RUN_FROM_BRANCH"] = args.version
+    if args.ptest:
+        params["PTEST_NAME"] = args.ptest
 
     resp = session.post(
         f"{JENKINS_BASE}{JOB_PATH}/buildWithParameters",
@@ -144,27 +217,29 @@ def cmd_trigger(args: argparse.Namespace) -> int:
     resp.raise_for_status()
     queue_url = resp.headers["Location"]
 
-    print(f"Triggered {name} (RUN_FROM_BRANCH={params['RUN_FROM_BRANCH']}), resolving build number...")
+    print(f"Triggered {name} (RUN_FROM_BRANCH={params['RUN_FROM_BRANCH']}, PTEST_NAME={params['PTEST_NAME']}), resolving build number...")
     build_number, build_url = resolve_queue_item(session, queue_url)
 
-    STATE_DIR.mkdir(exist_ok=True)
-    STATE_FILE.write_text(json.dumps({
+    save_state(name, {
         "name": name,
         "version": params["RUN_FROM_BRANCH"],
+        "ptest": params["PTEST_NAME"],
         "build_number": build_number,
         "build_url": build_url,
-        "triggered_at": dt.datetime.now(CET).isoformat(timespec="seconds"),
-    }, indent=2) + "\n")
+        "triggered_at": now_iso(),
+    })
 
     print(f"Build #{build_number} started: {build_url}")
+    print()
+    print("Next:")
+    print(f"  python3 trigger_topology.py wait    --name {name}")
+    print(f"  python3 trigger_topology.py verify  --name {name}")
+    print(f"  python3 trigger_topology.py monitor --name {name}")
     return 0
 
 
 def cmd_wait(args: argparse.Namespace) -> int:
-    if not STATE_FILE.exists():
-        print(f"ERROR: no state file at {STATE_FILE}. Run `trigger` first.", file=sys.stderr)
-        return 2
-    state = json.loads(STATE_FILE.read_text())
+    state = load_state(args.name)
     name = state["name"]
     build_url = state["build_url"]
     build_number = state["build_number"]
@@ -174,8 +249,18 @@ def cmd_wait(args: argparse.Namespace) -> int:
     deadline = time.monotonic() + BUILD_POLL_TIMEOUT_S
     started = time.monotonic()
     while time.monotonic() < deadline:
-        resp = session.get(f"{build_url}api/json", timeout=30)
-        resp.raise_for_status()
+        try:
+            resp = session.get(f"{build_url}api/json", timeout=30)
+            resp.raise_for_status()
+        except requests.HTTPError as e:
+            if e.response.status_code == 404:
+                print(f"WARN: Jenkins build no longer available (404). Skipping extraction.", file=sys.stderr, flush=True)
+                if state.get("slicer_name"):
+                    print(f"Using slicer_name from prior run: {state['slicer_name']}", flush=True)
+                    return 0
+                print(f"ERROR: build log expired and no slicer_name recorded. Re-run `trigger` to start fresh.", file=sys.stderr, flush=True)
+                return 2
+            raise
         data = resp.json()
         if not data.get("building"):
             result = data.get("result", "UNKNOWN")
@@ -186,8 +271,8 @@ def cmd_wait(args: argparse.Namespace) -> int:
                 if slicer_name:
                     print(f"Topology: {slicer_name}", flush=True)
                     state["slicer_name"] = slicer_name
-                    state["build_finished_at"] = dt.datetime.now(CET).isoformat(timespec="seconds")
-                    STATE_FILE.write_text(json.dumps(state, indent=2) + "\n")
+                    state["build_finished_at"] = now_iso()
+                    save_state(name, state)
                 else:
                     print("WARN: could not find topology name in console log", file=sys.stderr, flush=True)
             return 0 if result == "SUCCESS" else 1
@@ -198,34 +283,30 @@ def cmd_wait(args: argparse.Namespace) -> int:
     return 2
 
 
-def extract_slicer_name(session: requests.Session, build_url: str) -> str | None:
-    resp = session.get(f"{build_url}consoleText", timeout=60)
-    resp.raise_for_status()
-    m = SLICER_NAME_RE.search(resp.text)
-    return m.group(1) if m else None
-
-
 def cmd_verify(args: argparse.Namespace) -> int:
-    name = args.topology
-    if not name and STATE_FILE.exists():
-        name = json.loads(STATE_FILE.read_text()).get("slicer_name")
-    if not name:
-        print("ERROR: topology name not provided and not found in state (run `wait` first)", file=sys.stderr)
+    state = load_state(args.name)
+    slicer_name = state.get("slicer_name")
+    if not slicer_name:
+        print(f"ERROR: {args.name}: no slicer_name in state — run `wait --name {args.name}` first", file=sys.stderr)
         return 2
-    url = f"{SLICER_BASE}/v1_1/systest/{name}"
-    headers = {"owner": SLICER_OWNER, "Content-Type": "application/json"}
-    params = [("field", f) for f in SLICER_FIELDS]
 
-    print(f"Verifying topology {name}", flush=True)
+    print(f"Verifying topology {slicer_name}", flush=True)
     deadline = time.monotonic() + SLICER_POLL_TIMEOUT_S
     started = time.monotonic()
+    consecutive_404s = 0
     while time.monotonic() < deadline:
-        resp = requests.get(url, headers=headers, params=params, timeout=30, verify=False)
+        resp = slicer_get(slicer_name)
         if resp.status_code == 404:
+            consecutive_404s += 1
+            if consecutive_404s >= 2:
+                print(f"ERROR: topology {slicer_name} no longer exists in Slicer (TTL expired).", file=sys.stderr, flush=True)
+                print(f"       Topologies auto-delete after a retention period. Re-run `trigger` to provision a fresh one.", file=sys.stderr, flush=True)
+                return 2
             elapsed = int(time.monotonic() - started)
             print(f"  not in Slicer yet... ({elapsed // 60}m {elapsed % 60}s elapsed)", flush=True)
             time.sleep(SLICER_POLL_INTERVAL_S)
             continue
+        consecutive_404s = 0
         resp.raise_for_status()
         data = resp.json()
         status = (data.get("deploy_status") or "").lower()
@@ -233,11 +314,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
             print(f"Verified: {data['name']} present in Slicer (deploy_status={status})", flush=True)
             if args.verbose:
                 print(json.dumps(data, indent=2), flush=True)
-            if STATE_FILE.exists():
-                state = json.loads(STATE_FILE.read_text())
-                state["slicer_name"] = data["name"]
-                state["verified_at"] = dt.datetime.now(CET).isoformat(timespec="seconds")
-                STATE_FILE.write_text(json.dumps(state, indent=2) + "\n")
+            state["slicer_name"] = data["name"]
+            state["verified_at"] = now_iso()
+            save_state(args.name, state)
             return 0
         print(f"  empty deploy_status, retrying...", flush=True)
         time.sleep(SLICER_POLL_INTERVAL_S)
@@ -246,24 +325,21 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_monitor(args: argparse.Namespace) -> int:
-    name = args.topology
-    if not name and STATE_FILE.exists():
-        name = json.loads(STATE_FILE.read_text()).get("slicer_name")
-    if not name:
-        print("ERROR: topology name not provided and not found in state (run `wait` first)", file=sys.stderr)
+    state = load_state(args.name)
+    slicer_name = state.get("slicer_name")
+    if not slicer_name:
+        print(f"ERROR: {args.name}: no slicer_name in state — run `wait --name {args.name}` first", file=sys.stderr)
         return 2
-    url = f"{SLICER_BASE}/v1_1/systest/{name}"
-    headers = {"owner": SLICER_OWNER, "Content-Type": "application/json"}
-    params = [("field", f) for f in SLICER_FIELDS]
 
-    print(f"Monitoring deploy_status of {name}", flush=True)
+    print(f"Monitoring deploy_status of {slicer_name}", flush=True)
     started = time.monotonic()
     last_change = started
     last_status: str | None = None
     while time.monotonic() - last_change < MONITOR_POLL_TIMEOUT_S:
-        resp = requests.get(url, headers=headers, params=params, timeout=30, verify=False)
+        resp = slicer_get(slicer_name)
         if resp.status_code == 404:
-            print(f"ERROR: topology {name} no longer exists in Slicer (404) — was it deleted?", file=sys.stderr, flush=True)
+            print(f"ERROR: topology {slicer_name} no longer exists in Slicer (TTL expired).", file=sys.stderr, flush=True)
+            print(f"       Topologies auto-delete after a retention period.", file=sys.stderr, flush=True)
             return 2
         resp.raise_for_status()
         data = resp.json()
@@ -271,7 +347,7 @@ def cmd_monitor(args: argparse.Namespace) -> int:
         elapsed = int(time.monotonic() - started)
         if status != last_status:
             print(f"  [{elapsed // 60}m {elapsed % 60}s] deploy_status -> {status!r}", flush=True)
-            record_status_transition(status)
+            record_deploy_transition(args.name, status)
             last_status = status
             last_change = time.monotonic()
         else:
@@ -284,18 +360,219 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     return 2
 
 
-def record_status_transition(status: str) -> None:
-    if not STATE_FILE.exists():
-        return
-    state = json.loads(STATE_FILE.read_text())
-    now = dt.datetime.now(CET).isoformat(timespec="seconds")
+def record_deploy_transition(name: str, status: str) -> None:
     key = {
         "deploy_in_progress": "deploy_started_at",
         "deployed": "deployed_at",
     }.get(status)
-    if key and key not in state:
-        state[key] = now
-        STATE_FILE.write_text(json.dumps(state, indent=2) + "\n")
+    if not key:
+        return
+    try:
+        state = load_state(name)
+    except FileNotFoundError:
+        return
+    if key not in state:
+        state[key] = now_iso()
+        save_state(name, state)
+
+
+def cmd_undeploy(args: argparse.Namespace) -> int:
+    if args.all:
+        names = [p.stem for p in all_state_files()]
+        if not names:
+            print("Nothing to undeploy — no state files found.")
+            return 0
+        print(f"Sweeping undeploy across {len(names)} state file(s)", flush=True)
+        rc = 0
+        for n in names:
+            r = undeploy_one(n, skip_if_already_requested=True)
+            if r != 0:
+                rc = r
+        return rc
+    return undeploy_one(args.name, skip_if_already_requested=False)
+
+
+def undeploy_one(name: str, skip_if_already_requested: bool) -> int:
+    try:
+        state = load_state(name)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    slicer_name = state.get("slicer_name")
+    if not slicer_name:
+        print(f"  {name}: no slicer_name yet (build still running?) — skipping", flush=True)
+        return 0 if skip_if_already_requested else 2
+    if state.get("undeployed_at"):
+        print(f"  {name}: already undeployed at {state['undeployed_at']} — skipping", flush=True)
+        return 0
+    if skip_if_already_requested and state.get("undeploy_requested_at"):
+        print(f"  {name}: undeploy already requested at {state['undeploy_requested_at']} — skipping", flush=True)
+        return 0
+
+    url = f"{SLICER_BASE}/v1_1/systest/{slicer_name}/undeploy"
+    resp = requests.post(url, headers=slicer_headers(), json={"timeout": 300}, timeout=30, verify=False)
+    if resp.status_code not in (200, 202):
+        print(f"ERROR: {name}: undeploy returned HTTP {resp.status_code}: {resp.text[:200]}", file=sys.stderr, flush=True)
+        return 1
+    state["undeploy_requested_at"] = now_iso()
+    save_state(name, state)
+    print(f"  {name}: undeploy accepted ({resp.status_code}) for {slicer_name}", flush=True)
+    return 0
+
+
+def cmd_monitor_undeploy(args: argparse.Namespace) -> int:
+    if args.all:
+        names = []
+        for p in all_state_files():
+            try:
+                st = json.loads(p.read_text())
+            except json.JSONDecodeError:
+                continue
+            if st.get("undeploy_requested_at") and not st.get("undeployed_at"):
+                names.append(p.stem)
+        if not names:
+            print("Nothing to monitor — no topologies awaiting teardown.")
+            return 0
+    else:
+        names = [args.name]
+
+    targets: dict[str, str] = {}
+    for n in names:
+        try:
+            st = load_state(n)
+        except FileNotFoundError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
+        sn = st.get("slicer_name")
+        if not sn:
+            print(f"  {n}: no slicer_name — skipping", flush=True)
+            continue
+        targets[n] = sn
+
+    if not targets:
+        return 0
+
+    print(f"Monitoring undeploy of {len(targets)} topology(ies): {', '.join(sorted(targets))}", flush=True)
+    started = time.monotonic()
+    last_change = {n: started for n in targets}
+    last_status: dict[str, str | None] = {n: None for n in targets}
+    pending = set(targets)
+    rc = 0
+    while pending:
+        cycle_start = time.monotonic()
+        for n in list(pending):
+            slicer_name = targets[n]
+            resp = slicer_get(slicer_name)
+            if resp.status_code == 404:
+                elapsed = int(time.monotonic() - started)
+                print(f"  [{elapsed // 60}m {elapsed % 60}s] {n}: 404 from Slicer — record gone", flush=True)
+                _mark_undeployed(n)
+                pending.discard(n)
+                continue
+            resp.raise_for_status()
+            status = (resp.json().get("deploy_status") or "").lower()
+            elapsed = int(time.monotonic() - started)
+            if status != last_status[n]:
+                print(f"  [{elapsed // 60}m {elapsed % 60}s] {n}: deploy_status -> {status!r}", flush=True)
+                record_undeploy_transition(n, status)
+                last_status[n] = status
+                last_change[n] = time.monotonic()
+            if status == "not_deployed":
+                print(f"  {n}: undeployed in {elapsed // 60}m {elapsed % 60}s", flush=True)
+                pending.discard(n)
+        for n in list(pending):
+            if time.monotonic() - last_change[n] > MONITOR_POLL_TIMEOUT_S:
+                print(f"ERROR: {n}: deploy_status stuck at {last_status[n]!r} for {MONITOR_POLL_TIMEOUT_S // 60} minutes", file=sys.stderr, flush=True)
+                pending.discard(n)
+                rc = 2
+        if pending:
+            elapsed_cycle = time.monotonic() - cycle_start
+            time.sleep(max(0, MONITOR_POLL_INTERVAL_S - elapsed_cycle))
+    return rc
+
+
+def record_undeploy_transition(name: str, status: str) -> None:
+    key = {
+        "undeploy_in_progress": "undeploy_started_at",
+        "not_deployed": "undeployed_at",
+    }.get(status)
+    if not key:
+        return
+    try:
+        state = load_state(name)
+    except FileNotFoundError:
+        return
+    # `not_deployed` is also the initial state — only record undeployed_at if
+    # teardown was actually requested.
+    if key == "undeployed_at" and not state.get("undeploy_requested_at"):
+        return
+    if key not in state:
+        state[key] = now_iso()
+        save_state(name, state)
+
+
+def _mark_undeployed(name: str) -> None:
+    try:
+        state = load_state(name)
+    except FileNotFoundError:
+        return
+    if "undeployed_at" not in state:
+        state["undeployed_at"] = now_iso()
+        save_state(name, state)
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    files = all_state_files()
+    if not files:
+        print("No tracked topologies.")
+        return 0
+    header = f"{'NAME':<22} {'VERSION':<18} {'PTEST':<22} {'SLICER_NAME':<60} {'STAGE':<22} AT"
+    print(header)
+    for p in files:
+        try:
+            st = json.loads(p.read_text())
+        except json.JSONDecodeError:
+            print(f"{p.stem:<22} (corrupt state file)")
+            continue
+        stage, when = current_stage(st)
+        slicer = st.get('slicer_name', '-')
+        print(f"{st.get('name', p.stem):<22} {st.get('version', '-'):<18} {st.get('ptest', '-'):<22} {slicer:<60} {stage:<22} {when}")
+    return 0
+
+
+def current_stage(state: dict) -> tuple[str, str]:
+    for key in reversed(LIFECYCLE_KEYS):
+        if key in state:
+            return key.removesuffix("_at"), state[key]
+    return "unknown", "-"
+
+
+def cmd_latest(args: argparse.Namespace) -> int:
+    files = all_state_files()
+    if not files:
+        print("ERROR: no state files found — run `trigger` first", file=sys.stderr)
+        return 2
+    latest_name = None
+    latest_slicer = None
+    latest_time = None
+    for p in files:
+        try:
+            st = json.loads(p.read_text())
+        except json.JSONDecodeError:
+            continue
+        triggered = st.get("triggered_at")
+        if triggered and (latest_time is None or triggered > latest_time):
+            latest_name = st.get("name") or p.stem
+            latest_slicer = st.get("slicer_name")
+            latest_time = triggered
+    if latest_name:
+        if latest_slicer:
+            print(f"{latest_name}: {latest_slicer}")
+        else:
+            print(latest_name)
+        return 0
+    print("ERROR: no valid state files found", file=sys.stderr)
+    return 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -305,26 +582,45 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    trig = sub.add_parser("trigger", help="Fire the build and record state")
-    trig.add_argument("--name", help="Override RUN_NAME (default: Dispo-<MMDD> in CET)")
+    trig = sub.add_parser("trigger", help="Fire the build and create state/<name>.json")
+    trig.add_argument("--name", help="RUN_NAME and state filename (default: Dispo-<MMDD> in CET)")
     trig.add_argument(
         "--version",
-        help="AOS version to build from, sent as RUN_FROM_BRANCH (default: AOS_latest_OB). "
-             "Example: --version AOS_6.1.0_OB",
+        help="AOS version, sent as RUN_FROM_BRANCH (default: AOS_latest_OB). Example: --version AOS_6.1.0_OB",
     )
+    trig.add_argument("--ptest", help="PTEST_NAME override (default: evpn_mlag.vex)")
     trig.set_defaults(func=cmd_trigger)
 
     wait = sub.add_parser("wait", help="Poll until the recorded build finishes")
+    wait.add_argument("--name", required=True)
     wait.set_defaults(func=cmd_wait)
 
-    verify = sub.add_parser("verify", help="Confirm topology is registered with Slicer (any deploy_status)")
-    verify.add_argument("topology", nargs="?", help="Full Slicer topology name; defaults to state['slicer_name']")
+    verify = sub.add_parser("verify", help="Confirm topology is registered with Slicer")
+    verify.add_argument("--name", required=True)
     verify.add_argument("--verbose", "-v", action="store_true", help="Also print the full Slicer payload (large)")
     verify.set_defaults(func=cmd_verify)
 
-    monitor = sub.add_parser("monitor", help="Poll topology deploy_status until it reaches 'deployed'")
-    monitor.add_argument("topology", nargs="?", help="Full Slicer topology name; defaults to state['slicer_name']")
+    monitor = sub.add_parser("monitor", help="Poll deploy_status until 'deployed'")
+    monitor.add_argument("--name", required=True)
     monitor.set_defaults(func=cmd_monitor)
+
+    undeploy = sub.add_parser("undeploy", help="Send Slicer's undeploy call")
+    g = undeploy.add_mutually_exclusive_group(required=True)
+    g.add_argument("--name", help="Undeploy a single topology by run_name")
+    g.add_argument("--all", action="store_true", help="Sweep every state file with slicer_name and no undeploy_requested_at")
+    undeploy.set_defaults(func=cmd_undeploy)
+
+    monu = sub.add_parser("monitor-undeploy", help="Poll deploy_status until 'not_deployed'")
+    g2 = monu.add_mutually_exclusive_group(required=True)
+    g2.add_argument("--name")
+    g2.add_argument("--all", action="store_true", help="Watch every state file with undeploy_requested_at and no undeployed_at")
+    monu.set_defaults(func=cmd_monitor_undeploy)
+
+    lst = sub.add_parser("list", help="Show every tracked topology and its current stage")
+    lst.set_defaults(func=cmd_list)
+
+    lat = sub.add_parser("latest", help="Print the most-recently triggered topology's run_name")
+    lat.set_defaults(func=cmd_latest)
 
     return p
 
@@ -339,7 +635,7 @@ def main() -> int:
         body = e.response.text[:500] if e.response is not None else ""
         print(f"ERROR: HTTP {code} from {url}: {body}", file=sys.stderr)
         return 1
-    except (RuntimeError, TimeoutError) as e:
+    except (RuntimeError, TimeoutError, FileNotFoundError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 

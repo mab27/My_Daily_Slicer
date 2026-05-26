@@ -11,4 +11,8 @@ if [[ -f .env ]]; then
     set +a
 fi
 
-exec /usr/bin/env python3 trigger_topology.py trigger
+# Topology 1: evpn_mlag.vex (auto-name)
+python3 trigger_topology.py trigger
+
+# Topology 2: ai_scale.extra_small_evpn
+python3 trigger_topology.py trigger --name "Dispo-$(date +%m%d)-ai_scale" --ptest ai_scale.extra_small_evpn
