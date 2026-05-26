@@ -12,6 +12,7 @@ Subcommands:
   monitor           Watch deploy_status walk to 'deployed'.
   undeploy          POST Slicer's undeploy endpoint (one --name, or --all).
   monitor-undeploy  Watch deploy_status walk back to 'not_deployed'.
+  delete            DELETE topology record from Slicer (one --name, or --all).
   list              Show every tracked topology and its current stage.
   latest            Print the most-recently triggered topology's run_name.
 """
@@ -102,6 +103,7 @@ LIFECYCLE_KEYS = [
     "undeploy_requested_at",
     "undeploy_started_at",
     "undeployed_at",
+    "deleted_at",
 ]
 
 
@@ -411,6 +413,12 @@ def undeploy_one(name: str, skip_if_already_requested: bool) -> int:
 
     url = f"{SLICER_BASE}/v1_1/systest/{slicer_name}/undeploy"
     resp = requests.post(url, headers=slicer_headers(), json={"timeout": 300}, timeout=30, verify=False)
+    if resp.status_code == 412:
+        print(f"  {name}: topology no longer exists in Slicer (already deleted or expired) — skipping", flush=True)
+        state["undeploy_requested_at"] = now_iso()
+        state["undeployed_at"] = now_iso()
+        save_state(name, state)
+        return 0
     if resp.status_code not in (200, 202):
         print(f"ERROR: {name}: undeploy returned HTTP {resp.status_code}: {resp.text[:200]}", file=sys.stderr, flush=True)
         return 1
@@ -526,7 +534,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     if not files:
         print("No tracked topologies.")
         return 0
-    header = f"{'NAME':<22} {'VERSION':<18} {'PTEST':<22} {'SLICER_NAME':<60} {'STAGE':<22} AT"
+    header = f"{'NAME':<22} {'VERSION':<18} {'PTEST':<22} {'SLICER_NAME':<60} {'STATUS':<22} LAST_CHECKED"
     print(header)
     for p in files:
         try:
@@ -534,17 +542,164 @@ def cmd_list(args: argparse.Namespace) -> int:
         except json.JSONDecodeError:
             print(f"{p.stem:<22} (corrupt state file)")
             continue
-        stage, when = current_stage(st)
-        slicer = st.get('slicer_name', '-')
-        print(f"{st.get('name', p.stem):<22} {st.get('version', '-'):<18} {st.get('ptest', '-'):<22} {slicer:<60} {stage:<22} {when}")
+        slicer_name = st.get('slicer_name')
+        name = st.get('name', p.stem)
+        version = st.get('version', '-')
+        ptest = st.get('ptest', '-')
+
+        # Query Slicer for actual current status
+        if slicer_name:
+            resp = slicer_get(slicer_name)
+            if resp.status_code == 404:
+                status = "not_found_in_slicer"
+                last_checked = now_iso()
+            elif resp.ok:
+                data = resp.json()
+                status = (data.get("deploy_status") or "unknown").lower()
+                last_checked = now_iso()
+            else:
+                status = f"error_{resp.status_code}"
+                last_checked = now_iso()
+        else:
+            status = "not_created_yet"
+            last_checked = st.get("triggered_at", "-")
+
+        print(f"{name:<22} {version:<18} {ptest:<22} {(slicer_name or '-'):<60} {status:<22} {last_checked}")
     return 0
 
 
 def current_stage(state: dict) -> tuple[str, str]:
-    for key in reversed(LIFECYCLE_KEYS):
-        if key in state:
-            return key.removesuffix("_at"), state[key]
+    # Map to actual Slicer deploy_status states + pre-deployment stages
+    if state.get("deleted_at"):
+        return "deleted", state["deleted_at"]
+    if state.get("undeployed_at"):
+        return "not_deployed", state["undeployed_at"]
+    if state.get("undeploy_started_at"):
+        return "undeploy_in_progress", state["undeploy_started_at"]
+    if state.get("deployed_at"):
+        return "deployed", state["deployed_at"]
+    if state.get("deploy_started_at"):
+        return "deploy_in_progress", state["deploy_started_at"]
+    if state.get("verified_at"):
+        return "not_deployed", state["verified_at"]  # Topology exists but hasn't started deploying
+    if state.get("build_finished_at"):
+        return "not_deployed", state["build_finished_at"]  # Topology created but not yet verified
+    if state.get("triggered_at"):
+        return "triggered", state["triggered_at"]  # Build still running
     return "unknown", "-"
+
+
+def cmd_delete(args: argparse.Namespace) -> int:
+    if args.all:
+        names = [p.stem for p in all_state_files()]
+        if not names:
+            print("Nothing to delete — no state files found.")
+            return 0
+        print(f"Sweeping delete across {len(names)} state file(s)", flush=True)
+        skipped = []
+        for n in names:
+            was_skipped = delete_one(n, skip_if_already_deleted=True)
+            if was_skipped:
+                skipped.append(n)
+        if skipped:
+            print(f"Note: {len(skipped)} topology(ies) not ready yet (resources releasing): {', '.join(skipped)}", file=sys.stderr, flush=True)
+            print("Retry delete in a moment: python3 trigger_topology.py delete --all", file=sys.stderr, flush=True)
+        return 0
+    return delete_one(args.name, skip_if_already_deleted=False)
+
+
+def delete_one(name: str, skip_if_already_deleted: bool) -> bool | int:
+    try:
+        state = load_state(name)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2 if not skip_if_already_deleted else False
+    slicer_name = state.get("slicer_name")
+    if not slicer_name:
+        print(f"  {name}: no slicer_name yet (build still running?) — skipping", flush=True)
+        return False if skip_if_already_deleted else 2
+    if state.get("deleted_at"):
+        if skip_if_already_deleted:
+            print(f"  {name}: already deleted at {state['deleted_at']} — skipping", flush=True)
+            return False
+        print(f"WARN: {name}: already deleted at {state['deleted_at']}, deleting again", flush=True)
+
+    url = f"{SLICER_BASE}/v1_1/systest/{slicer_name}"
+    resp = requests.delete(url, headers=slicer_headers(), timeout=30, verify=False)
+    if resp.status_code == 404:
+        print(f"  {name}: topology no longer exists in Slicer (already deleted or expired) — marking as deleted", flush=True)
+        state["deleted_at"] = now_iso()
+        save_state(name, state)
+        return False
+    if resp.status_code == 412:
+        if skip_if_already_deleted:
+            print(f"  {name}: testbed still releasing resources — skipping for now", flush=True)
+            return True
+        print(f"WARN: {name}: cannot delete yet — testbed still releasing resources. Retry in a moment.", file=sys.stderr, flush=True)
+        return 1
+    if resp.status_code not in (200, 204):
+        print(f"ERROR: {name}: delete returned HTTP {resp.status_code}: {resp.text[:200]}", file=sys.stderr, flush=True)
+        return 1 if not skip_if_already_deleted else False
+    state["deleted_at"] = now_iso()
+    save_state(name, state)
+    print(f"  {name}: deleted for {slicer_name}", flush=True)
+    return False
+
+
+def cmd_purge(args: argparse.Namespace) -> int:
+    files = all_state_files()
+    if not files:
+        print("No state files to purge.")
+        return 0
+
+    to_delete = []
+    to_keep = []
+
+    # Check each topology against Slicer
+    for p in files:
+        try:
+            st = json.loads(p.read_text())
+        except json.JSONDecodeError:
+            to_delete.append((p, "corrupt state file"))
+            continue
+
+        slicer_name = st.get("slicer_name")
+        if not slicer_name:
+            to_keep.append((p, "not yet created in Slicer"))
+            continue
+
+        # Query Slicer
+        resp = slicer_get(slicer_name)
+        if resp.status_code == 404:
+            to_delete.append((p, "no longer exists in Slicer"))
+        else:
+            to_keep.append((p, f"still in Slicer (status: {resp.json().get('deploy_status', '?')})"))
+
+    if not to_delete:
+        print("No expired topologies to purge. All state files are still valid.")
+        return 0
+
+    print(f"Will delete {len(to_delete)} expired state file(s):")
+    for p, reason in to_delete:
+        print(f"  {p.name} — {reason}")
+
+    if to_keep:
+        print(f"\nWill keep {len(to_keep)} active state file(s):")
+        for p, reason in to_keep:
+            print(f"  {p.name} — {reason}")
+
+    if not args.force:
+        response = input("\nProceed with purge? (type 'yes' to confirm): ").strip().lower()
+        if response != "yes":
+            print("Cancelled.")
+            return 0
+
+    for p, _ in to_delete:
+        p.unlink()
+        print(f"Deleted {p.name}")
+
+    print(f"\nPurged {len(to_delete)} expired state file(s).")
+    return 0
 
 
 def cmd_latest(args: argparse.Namespace) -> int:
@@ -616,11 +771,21 @@ def build_parser() -> argparse.ArgumentParser:
     g2.add_argument("--all", action="store_true", help="Watch every state file with undeploy_requested_at and no undeployed_at")
     monu.set_defaults(func=cmd_monitor_undeploy)
 
+    delete = sub.add_parser("delete", help="Delete topology record from Slicer")
+    g3 = delete.add_mutually_exclusive_group(required=True)
+    g3.add_argument("--name", help="Delete a single topology by run_name")
+    g3.add_argument("--all", action="store_true", help="Sweep every state file with slicer_name and no deleted_at")
+    delete.set_defaults(func=cmd_delete)
+
     lst = sub.add_parser("list", help="Show every tracked topology and its current stage")
     lst.set_defaults(func=cmd_list)
 
     lat = sub.add_parser("latest", help="Print the most-recently triggered topology's run_name")
     lat.set_defaults(func=cmd_latest)
+
+    purge = sub.add_parser("purge", help="Delete all state files (start fresh)")
+    purge.add_argument("--force", action="store_true", help="Skip confirmation prompt")
+    purge.set_defaults(func=cmd_purge)
 
     return p
 
