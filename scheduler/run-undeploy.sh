@@ -12,4 +12,5 @@ if [[ -f .env ]]; then
 fi
 
 python3 trigger_topology.py undeploy --all
-exec /usr/bin/env python3 trigger_topology.py monitor-undeploy --all
+python3 trigger_topology.py monitor-undeploy --all
+exec /usr/bin/env python3 trigger_topology.py delete --all
