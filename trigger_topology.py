@@ -608,6 +608,32 @@ def cmd_delete(args: argparse.Namespace) -> int:
     return delete_one(args.name, skip_if_already_deleted=False)
 
 
+def is_reservation_released(slicer_name: str) -> bool:
+    resp = slicer_get(slicer_name)
+    if resp.status_code == 404:
+        return True
+    if resp.ok:
+        data = resp.json()
+        status = data.get("reservation", {}).get("status", "").lower()
+        return status != "reserved"
+    return False
+
+
+def request_unreserve(slicer_name: str) -> int:
+    url = f"{SLICER_BASE}/v1_1/systest/{slicer_name}/unreserve"
+    resp = requests.post(url, headers=slicer_headers(), timeout=30, verify=False)
+    return resp.status_code
+
+
+def wait_for_reservation_release(slicer_name: str, timeout_s: int = 600) -> bool:
+    start = time.time()
+    while time.time() - start < timeout_s:
+        if is_reservation_released(slicer_name):
+            return True
+        time.sleep(20)
+    return False
+
+
 def delete_one(name: str, skip_if_already_deleted: bool) -> bool | int:
     try:
         state = load_state(name)
@@ -624,6 +650,25 @@ def delete_one(name: str, skip_if_already_deleted: bool) -> bool | int:
             return False
         print(f"WARN: {name}: already deleted at {state['deleted_at']}, deleting again", flush=True)
 
+    if not is_reservation_released(slicer_name):
+        print(f"  {name}: reservation still active, requesting release...", flush=True)
+        rc = request_unreserve(slicer_name)
+        if rc not in (200, 202, 204):
+            msg = f"unreserve returned HTTP {rc}"
+            if skip_if_already_deleted:
+                print(f"  {name}: {msg} — skipping for now", flush=True)
+                return True
+            print(f"ERROR: {name}: {msg}", file=sys.stderr, flush=True)
+            return 1
+        print(f"  {name}: waiting for reservation release...", flush=True)
+        if not wait_for_reservation_release(slicer_name):
+            msg = "reservation did not release within 10 minutes"
+            if skip_if_already_deleted:
+                print(f"  {name}: {msg} — skipping for now", flush=True)
+                return True
+            print(f"ERROR: {name}: {msg}", file=sys.stderr, flush=True)
+            return 1
+
     url = f"{SLICER_BASE}/v1_1/systest/{slicer_name}"
     resp = requests.delete(url, headers=slicer_headers(), timeout=30, verify=False)
     if resp.status_code == 404:
@@ -633,16 +678,16 @@ def delete_one(name: str, skip_if_already_deleted: bool) -> bool | int:
         return False
     if resp.status_code == 412:
         if skip_if_already_deleted:
-            print(f"  {name}: testbed still releasing resources — skipping for now", flush=True)
+            print(f"  {name}: delete precondition failed — skipping for now", flush=True)
             return True
-        print(f"WARN: {name}: cannot delete yet — testbed still releasing resources. Retry in a moment.", file=sys.stderr, flush=True)
+        print(f"ERROR: {name}: cannot delete — {resp.text[:200]}", file=sys.stderr, flush=True)
         return 1
     if resp.status_code not in (200, 204):
         print(f"ERROR: {name}: delete returned HTTP {resp.status_code}: {resp.text[:200]}", file=sys.stderr, flush=True)
         return 1 if not skip_if_already_deleted else False
     state["deleted_at"] = now_iso()
     save_state(name, state)
-    print(f"  {name}: deleted for {slicer_name}", flush=True)
+    print(f"  {name}: deleted", flush=True)
     return False
 
 
