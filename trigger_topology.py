@@ -354,6 +354,9 @@ def cmd_monitor(args: argparse.Namespace) -> int:
             last_change = time.monotonic()
         else:
             print(f"  {status}... ({elapsed // 60}m {elapsed % 60}s elapsed)", flush=True)
+        if status == "deploy_failed":
+            print(f"ERROR: deployment failed — topology cannot recover from this state.", file=sys.stderr, flush=True)
+            return 2
         if status == "deployed":
             print(f"Deployed in {elapsed // 60}m {elapsed % 60}s", flush=True)
             return 0
