@@ -2,8 +2,7 @@
 
 A little helper that asks Jenkins for fresh test topologies every morning and
 tears them all down again at night, so I always have one (or several) waiting
-when I sit down to work and nothing lingering when I don't. Tracks parent tasks
-**MAB-15** (provision) and **MAB-16** (deprovision).
+when I sit down to work and nothing lingering when I don't.
 
 Each provision run kicks off `Give_me_a_topology` with a custom `RUN_NAME` and
 waits for Slicer to finish deploying it. Each teardown run posts Slicer's
