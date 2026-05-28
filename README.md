@@ -201,27 +201,52 @@ not_deployed → deploy_in_progress → deployed → undeploy_in_progress → no
 
 ## What the output looks like
 
-A trimmed real provision run (build #72697, 2026-05-23):
+A real full provision run (build #72842, 2026-05-27):
 
 ```text
-Triggered Dispo-0523 (RUN_FROM_BRANCH=AOS_latest_OB, PTEST_NAME=evpn_mlag.vex), resolving build number...
-Build #72697 started: https://jenkins.dc1.apstra.com/.../72697/
-Waiting on Dispo-0523 (build #72697)
-  building... (0m 32s elapsed)
+Triggered Dispo-0527 (RUN_FROM_BRANCH=AOS_latest_OB, PTEST_NAME=evpn_mlag.vex), resolving build number...
+Build #72842 started: https://jenkins.dc1.apstra.com/job/ptest/job/Give_me_a_topology/72842/
+
+Next:
+  python3 trigger_topology.py wait    --name Dispo-0527
+  python3 trigger_topology.py verify  --name Dispo-0527
+  python3 trigger_topology.py monitor --name Dispo-0527
+Waiting on Dispo-0527 (build #72842): https://jenkins.dc1.apstra.com/job/ptest/job/Give_me_a_topology/72842/
+  building... (0m 1s elapsed)
+  building... (0m 31s elapsed)
+  building... (1m 2s elapsed)
+  building... (1m 33s elapsed)
   building... (2m 3s elapsed)
-  building... (5m 6s elapsed)
-Finished: SUCCESS (took 5m 56s)
-Topology: zz-Dispo-0523-evpn_mlag.vex.2485377892354-961841954
-
-Verifying topology zz-Dispo-0523-evpn_mlag.vex...
-Verified: present in Slicer (deploy_status=not_deployed)
-
-Monitoring deploy_status of zz-Dispo-0523-...
+  building... (2m 33s elapsed)
+  building... (3m 4s elapsed)
+  building... (3m 34s elapsed)
+  building... (4m 5s elapsed)
+  building... (4m 35s elapsed)
+Finished: SUCCESS (took 4m 39s)
+Topology: zz-Dispo-0527-evpn_mlag.vex.2485377892354-2712748396
+Verifying topology zz-Dispo-0527-evpn_mlag.vex.2485377892354-2712748396
+Verified: zz-Dispo-0527-evpn_mlag.vex.2485377892354-2712748396 present in Slicer (deploy_status=not_deployed)
+Monitoring deploy_status of zz-Dispo-0527-evpn_mlag.vex.2485377892354-2712748396
   [0m 0s] deploy_status -> 'not_deployed'
+  not_deployed... (2m 1s elapsed)
+  not_deployed... (4m 2s elapsed)
+  not_deployed... (6m 4s elapsed)
+  not_deployed... (8m 4s elapsed)
   not_deployed... (10m 5s elapsed)
-  [44m 22s] deploy_status -> 'deploy_in_progress'
-  [51m 14s] deploy_status -> 'deployed'
-Deployed in 51m 14s
+  not_deployed... (12m 6s elapsed)
+  not_deployed... (14m 7s elapsed)
+  not_deployed... (16m 8s elapsed)
+  not_deployed... (18m 8s elapsed)
+  not_deployed... (20m 9s elapsed)
+  not_deployed... (22m 10s elapsed)
+  not_deployed... (24m 11s elapsed)
+  not_deployed... (26m 12s elapsed)
+  [28m 13s] deploy_status -> 'deploy_in_progress'
+  deploy_in_progress... (30m 14s elapsed)
+  deploy_in_progress... (32m 15s elapsed)
+  deploy_in_progress... (34m 16s elapsed)
+  [36m 17s] deploy_status -> 'deployed'
+Deployed in 36m 17s
 ```
 
 A couple of things to know when reading it:
