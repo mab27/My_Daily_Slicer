@@ -208,6 +208,8 @@ def cmd_trigger(args: argparse.Namespace) -> int:
         params["RUN_FROM_BRANCH"] = args.version
     if args.ptest:
         params["PTEST_NAME"] = args.ptest
+    if args.suite_args:
+        params["SUITE_ARGS"] = args.suite_args
 
     resp = session.post(
         f"{JENKINS_BASE}{JOB_PATH}/buildWithParameters",
@@ -219,13 +221,15 @@ def cmd_trigger(args: argparse.Namespace) -> int:
     resp.raise_for_status()
     queue_url = resp.headers["Location"]
 
-    print(f"Triggered {name} (RUN_FROM_BRANCH={params['RUN_FROM_BRANCH']}, PTEST_NAME={params['PTEST_NAME']}), resolving build number...")
+    suite_note = f", SUITE_ARGS={params['SUITE_ARGS']!r}" if params["SUITE_ARGS"] else ""
+    print(f"Triggered {name} (RUN_FROM_BRANCH={params['RUN_FROM_BRANCH']}, PTEST_NAME={params['PTEST_NAME']}{suite_note}), resolving build number...")
     build_number, build_url = resolve_queue_item(session, queue_url)
 
     save_state(name, {
         "name": name,
         "version": params["RUN_FROM_BRANCH"],
         "ptest": params["PTEST_NAME"],
+        "suite_args": params["SUITE_ARGS"],
         "build_number": build_number,
         "build_url": build_url,
         "triggered_at": now_iso(),
@@ -789,6 +793,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="AOS version, sent as RUN_FROM_BRANCH (default: AOS_latest_OB). Example: --version AOS_6.1.0_OB",
     )
     trig.add_argument("--ptest", help="PTEST_NAME override (default: evpn_mlag.vex)")
+    trig.add_argument(
+        "--suite-args",
+        help='SUITE_ARGS passed verbatim to Jenkins. Example: --suite-args "--leaf3_os_type=vevo --leaf4_os_type=vevo"',
+    )
     trig.set_defaults(func=cmd_trigger)
 
     wait = sub.add_parser("wait", help="Poll until the recorded build finishes")

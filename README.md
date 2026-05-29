@@ -135,6 +135,18 @@ python3 trigger_topology.py trigger \
   --ptest evpn_mlag.vex
 ```
 
+### Passing SUITE_ARGS (e.g. vevo leafs)
+
+`--suite-args` is forwarded verbatim to Jenkins' `SUITE_ARGS` parameter — pass
+the exact same string you'd type in the Jenkins build form. For example, to
+bring up two leafs as vevo:
+
+```sh
+python3 trigger_topology.py trigger \
+  --name Dispo-0524-vevo \
+  --suite-args "--leaf3_os_type=vevo --leaf4_os_type=vevo"
+```
+
 ### Tearing things down
 
 Three-step teardown: undeploy → monitor → delete.
